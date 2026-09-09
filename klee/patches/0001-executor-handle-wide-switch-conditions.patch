@@ -1,0 +1,15 @@
+diff --git a/lib/Core/Executor.cpp b/lib/Core/Executor.cpp
+index eb7ade0..1dfcf9f 100644
+--- a/lib/Core/Executor.cpp
++++ b/lib/Core/Executor.cpp
+@@ -2415,7 +2415,9 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
+       // Somewhat gross to create these all the time, but fine till we
+       // switch to an internal rep.
+       llvm::IntegerType *Ty = cast<IntegerType>(si->getCondition()->getType());
+-      ConstantInt *ci = ConstantInt::get(Ty, CE->getZExtValue());
++      // Use the full-precision APInt: switch conditions may be wider than
++      // 64 bits (e.g. Rust emits i96 switches) or negative.
++      ConstantInt *ci = cast<ConstantInt>(ConstantInt::get(Ty, CE->getAPValue()));
+       unsigned index = si->findCaseValue(ci)->getSuccessorIndex();
+       transferToBasicBlock(si->getSuccessor(index), si->getParent(), state);
+     } else {

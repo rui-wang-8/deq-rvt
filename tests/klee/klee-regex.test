@@ -1,0 +1,7 @@
+; Verify the regex crate under KLEE: symbolic haystacks; find/is_match/
+; captures agreement and span validity must hold.
+; RUN: rm -rf %S/../../demos/klee-regex/target
+; RUN: cd %S/../../demos/klee-regex && %cargo-verify --backend=klee 2>&1 | %FileCheck %s
+; CHECK: Running 1 test(s)
+; CHECK: test main ... OK
+; CHECK: VERIFICATION_RESULT: VERIFIED

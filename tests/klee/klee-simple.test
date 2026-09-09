@@ -1,0 +1,7 @@
+; Smoke test of the full RVT -> KLEE pipeline: a symbolic value and a
+; property that must hold for all inputs.
+; RUN: rm -rf %S/../../demos/klee-simple/target
+; RUN: cd %S/../../demos/klee-simple && %cargo-verify --backend=klee 2>&1 | %FileCheck %s
+; CHECK: Running 1 test(s)
+; CHECK: test main ... OK
+; CHECK: VERIFICATION_RESULT: VERIFIED

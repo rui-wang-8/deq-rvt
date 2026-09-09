@@ -111,12 +111,8 @@ Changes from the original flow:
 Building the tools (KLEE, rvt-patch-llvm, cargo-verify):
 
 ```
-# 1. KLEE 3.x against LLVM 18 (installs to tools/klee):
-#    cmake -S klee-src -B klee-build -DCMAKE_INSTALL_PREFIX=$PWD/tools/klee \
-#          -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm -DENABLE_SOLVER_Z3=ON ...
-#    make -C klee-build -j && make -C klee-build install
-#    NOTE: replace lib/Core/Executor.cpp's switch handling to use
-#    CE->getAPValue() (see below) - Rust emits i96 switches.
+# 1. KLEE (the RVT fork: tools/klee-src, branch rvt-for-rust) -> tools/klee
+scripts/build-klee.sh
 
 # 2. RVT runtime bitcode and tools:
 make -C runtime TGT=klee
@@ -134,6 +130,15 @@ cargo-verify --backend=klee --manifest-path demos/klee-simple/Cargo.toml
 cargo-verify --backend=klee --manifest-path demos/klee-regex/Cargo.toml
 cargo-verify --backend=klee --manifest-path demos/klee-serde-json/Cargo.toml
 ```
+
+Running the test suite (lit-based):
+
+```
+scripts/run-tests.sh
+```
+
+The full flow (pipeline stages, fork maintenance, harness writing, test
+suite) is documented in [docs/klee-flow.md](docs/klee-flow.md).
 
 The demos pin `rustc 1.81.0` via `rust-toolchain.toml`. The crate under
 test must be compiled by a rustc whose bundled LLVM matches the LLVM

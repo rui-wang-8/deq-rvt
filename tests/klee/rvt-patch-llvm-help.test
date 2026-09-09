@@ -1,0 +1,3 @@
+; RUN: %rvt-patch-llvm --help | %FileCheck %s
+; CHECK: rvt-patch-llvm
+; CHECK: Preprocess rustc generated llvm code for verification
