@@ -22,3 +22,6 @@ klee-last
 kleeout*
 klee-bisect*/
 klee-trace*/
+
+# deq dump output artifacts
+rust-dumps/

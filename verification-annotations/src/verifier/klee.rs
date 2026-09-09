@@ -30,6 +30,9 @@ extern "C" {
     // `value` and the current path condition as SMT-LIB files under
     // KLEE_DUMP_DIR.  Defined via --defsym for native (non-KLEE) builds.
     fn klee_dump_expr(name: *const i8, value: u64);
+    // Memory-region variant: dumps the symbolic expression of `ptr[..len]`
+    // (little-endian byte concatenation) for byte arrays, strings, structs.
+    fn klee_dump_expr_mem(name: *const i8, ptr: *const u8, len: u64);
 }
 
 unsafe fn get_value_i8(x: i8) -> i8 {
@@ -211,6 +214,21 @@ pub fn dump_expr(tag: &str, value: u64) {
     }
     let tag = std::ffi::CString::new(tag).expect("dump_expr: tag has a NUL byte");
     unsafe { klee_dump_expr(tag.as_ptr(), value) }
+}
+
+/// Dump the symbolic expression of a byte region (deq hook).
+///
+/// Like [`dump_expr`], but for byte arrays, strings and structs: the
+/// region's bytes are concatenated little-endian into one bit-vector.
+/// The length must be concrete (fixed-size regions or slices whose
+/// length is statically known on the dumped path).
+pub fn dump_expr_bytes(tag: &str, bytes: &[u8]) {
+    if is_replay() {
+        return;
+    }
+    let tag =
+        std::ffi::CString::new(tag).expect("dump_expr_bytes: tag has a NUL byte");
+    unsafe { klee_dump_expr_mem(tag.as_ptr(), bytes.as_ptr(), bytes.len() as u64) }
 }
 
 /// Open a merge block

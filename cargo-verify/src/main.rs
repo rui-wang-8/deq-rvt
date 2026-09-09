@@ -733,10 +733,11 @@ fn get_build_envs(opt: &Opt) -> CVResult<Vec<(String, String)>> {
         // is not (and cannot be) provided in that library.
         // Defining this symbol allows code that uses is_symbolic to be linked.
         rustflags.push_str(" -Clink-arg=-Wl,--defsym=klee_is_symbolic=0");
-        // The deq dump hook (klee_dump_expr) is intercepted by KLEE; the
-        // defsym makes native (non-KLEE) builds link. The Rust wrapper
-        // never calls it during ktest replay.
+        // The deq dump hooks (klee_dump_expr / klee_dump_expr_mem) are
+        // intercepted by KLEE; the defsyms make native (non-KLEE) builds
+        // link. The Rust wrappers never call them during ktest replay.
         rustflags.push_str(" -Clink-arg=-Wl,--defsym=klee_dump_expr=0");
+        rustflags.push_str(" -Clink-arg=-Wl,--defsym=klee_dump_expr_mem=0");
 
         // Native (non-KLEE) builds of the crate link against libkleeRuntest
         // (used when replaying ktest files). Provide the search path.
