@@ -8,8 +8,8 @@ use verification_annotations::prelude::*;
 
 fn main() {
     // A symbolic 3-character pattern and a 4-character haystack.
-    let pat: String = verifier::verifier_nondet_ascii_string(3);
-    let text: String = verifier::verifier_nondet_ascii_string(4);
+    let pat: String = verifier::verifier_nondet_ascii_string(2);
+    let text: String = verifier::verifier_nondet_ascii_string(3);
 
     match Regex::new(&pat) {
         Ok(re) => {

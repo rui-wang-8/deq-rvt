@@ -315,18 +315,25 @@ fn replay_klee(opt: &Opt, name: &str, ktest: &Path) -> CVResult<()> {
         }
     }
 
-    let rustflags = match std::env::var_os("RUSTFLAGS") {
-        Some(env_rustflags) => env_rustflags.append(" --cfg=verify"),
-        None => OsString::from("--cfg=verify"),
-    };
-    cmd.env("RUSTFLAGS", rustflags).env("KTEST_FILE", ktest);
-
     // libkleeRuntest is a shared library in KLEE >= 3.0.
     let klee_dir = std::env::var("KLEE_DIR").unwrap_or_else(|_| {
         std::env::var("RVT_DIR")
             .map(|d| format!("{}/tools/klee", d))
             .unwrap_or_default()
     });
+
+    // Rebuilding natively for replay links against libkleeRuntest;
+    // provide the search path (the verification build got it from
+    // get_build_envs, but that is not used here).
+    let mut rustflags = match std::env::var_os("RUSTFLAGS") {
+        Some(env_rustflags) => env_rustflags.append(" --cfg=verify"),
+        None => OsString::from("--cfg=verify"),
+    };
+    if !klee_dir.is_empty() {
+        rustflags = rustflags.append(format!(" -Lnative={}/lib", klee_dir));
+    }
+    cmd.env("RUSTFLAGS", rustflags).env("KTEST_FILE", ktest);
+
     if !klee_dir.is_empty() {
         let lib = format!("{}/lib", klee_dir);
         let path = match std::env::var("LD_LIBRARY_PATH") {
