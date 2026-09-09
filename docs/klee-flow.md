@@ -174,3 +174,23 @@ serde_json and regex symbolic explorations).
   `verification-annotations` passes assumptions via a branch-free cast.
 - The seahorn/smack/proptest backends are unchanged from the original
   project and untested by this suite.
+
+## 9. deq differential-equivalence dumps (SMT2 output of mapped variables)
+
+For differential equivalence checking (C vs Rust, or Rust vs Rust), the
+RVT KLEE fork provides deq's `klee_dump_expr` hook:
+
+- Rust harnesses call `verifier::dump_expr(tag, value)` (and make their
+  inputs symbolic with `verifier::make_symbolic_named(&mut x, "stdin")`
+  so that equivalent implementations share input array names).
+- Under KLEE with `KLEE_DUMP_DIR` set, each explored path writes
+  `<KLEE_DUMP_DIR>/<tag>.<state-id>.smt2` (the symbolic output
+  expression) and `<tag>.<state-id>.pc.smt2` (the path condition).
+- `scripts/compare-klee-dumps.py a.smt2 b.smt2 --pc-a ... --pc-b ...`
+  combines the two dumps and proves them equivalent with Z3 (UNSAT).
+- `scripts/klee-dump-to-def.py` converts a dump to a `define-fun` for
+  other tooling.
+
+Example: `demos/klee-deq-dump` (Rust) and `tests/klee/c_combine.c` (C)
+implement the same computation; `tests/klee/klee-deq-dump.test` runs
+both and checks the Z3 verdict is `EQUIV`.

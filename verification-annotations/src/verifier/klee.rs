@@ -26,6 +26,10 @@ extern "C" {
     fn klee_get_value_f(x: f32) -> f32;
     fn klee_get_value_d(x: f64) -> f64;
     fn klee_is_symbolic(x: usize) -> i32;
+    // deq hook (see the RVT KLEE fork): dumps the symbolic expression of
+    // `value` and the current path condition as SMT-LIB files under
+    // KLEE_DUMP_DIR.  Defined via --defsym for native (non-KLEE) builds.
+    fn klee_dump_expr(name: *const i8, value: u64);
 }
 
 unsafe fn get_value_i8(x: i8) -> i8 {
@@ -134,6 +138,22 @@ impl VerifierNonDet for bool {
     }
 }
 
+/// Make `v` symbolic under a specific KLEE name.
+///
+/// deq convention: equivalent implementations must give their
+/// corresponding inputs the SAME name (e.g. `"stdin"`), so that the
+/// SMT2 dumps of both sides declare identical input arrays and the
+/// equivalence query naturally equates the inputs.
+pub fn make_symbolic_named<T>(v: &mut T, name: &str) {
+    unsafe {
+        let data: *mut u8 = v as *mut T as *mut u8;
+        let length = core::mem::size_of::<T>();
+        let name =
+            std::ffi::CString::new(name).expect("make_symbolic_named: NUL byte in name");
+        klee_make_symbolic(data, length, name.as_ptr());
+    }
+}
+
 /// Assume that condition `cond` is true
 ///
 /// Any paths found must satisfy this assumption.
@@ -171,6 +191,26 @@ pub fn reject() -> ! {
 /// variables that may be either symbolic or concrete.
 pub fn is_replay() -> bool {
     unsafe { klee_is_replay() != 0 }
+}
+
+/// Dump the symbolic expression of a scalar output variable as SMT-LIB
+/// (deq hook).
+///
+/// When running under KLEE with `KLEE_DUMP_DIR` set, this writes
+/// `<KLEE_DUMP_DIR>/<tag>.<state-id>.smt2` (the value expression) and
+/// `<KLEE_DUMP_DIR>/<tag>.<state-id>.pc.smt2` (the path condition), one
+/// pair per explored path. This is the Rust counterpart of the
+/// `klee_dump_expr` hook that deq uses for C; the dumps of two
+/// implementations of the same computation can be checked for
+/// equivalence with Z3.
+///
+/// During ktest replay (native execution) the call is a no-op.
+pub fn dump_expr(tag: &str, value: u64) {
+    if is_replay() {
+        return;
+    }
+    let tag = std::ffi::CString::new(tag).expect("dump_expr: tag has a NUL byte");
+    unsafe { klee_dump_expr(tag.as_ptr(), value) }
 }
 
 /// Open a merge block

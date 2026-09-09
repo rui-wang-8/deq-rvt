@@ -34,4 +34,21 @@ fi
 # Single worker by default: the tests run KLEE, which is single-threaded
 # per process, and lit's multi-process pool needs POSIX semaphores (not
 # available in every environment). Pass e.g. -j4 to override.
-exec "${LIT[@]}" "${RVT_DIR}/tests" -j1 --timeout=1200 "$@"
+#
+# lit >= 18 requires at least one test path and rejects paths mixed with
+# an explicit suite dir, so: when the caller passes test paths, hand them
+# to lit directly (the suite is discovered from the path); otherwise run
+# the whole suite directory.
+has_path=0
+for arg in "$@"; do
+    case "$arg" in
+        -*) ;;
+        *) has_path=1 ;;
+    esac
+done
+
+if [ "$has_path" -eq 1 ]; then
+    exec "${LIT[@]}" -j1 --timeout=1200 "$@"
+else
+    exec "${LIT[@]}" "${RVT_DIR}/tests" -j1 --timeout=1200 "$@"
+fi

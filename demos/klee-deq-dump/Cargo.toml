@@ -1,0 +1,10 @@
+[package]
+name = "klee-deq-dump"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+verification-annotations = { path = "../../verification-annotations" }
+
+[features]
+verifier-klee = ["verification-annotations/verifier-klee"]

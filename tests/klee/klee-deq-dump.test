@@ -1,0 +1,14 @@
+; C <-> Rust differential equivalence through the deq SMT2-dump hook:
+; the C twin of demos/klee-deq-dump is compiled with clang, both sides
+; run under KLEE, and the dumped output expressions are proven equal
+; with Z3.
+; RUN: rm -rf %t.cdir %t.dumps && mkdir -p %t.cdir %t.dumps
+; RUN: clang-18 -I %rvt_dir/tools/klee/include -emit-llvm -c %S/c_combine.c -o %t.cdir/c_combine.bc
+; RUN: KLEE_DUMP_DIR=%t.dumps %klee --exit-on-error --entry-point=main --libc=klee --output-dir=%t.cdir/c-klee-out %t.cdir/c_combine.bc 2>&1 | %FileCheck %s --check-prefix=KLEE-C
+; KLEE-C: KLEE: done: completed paths = 1
+; RUN: rm -rf %S/../../demos/klee-deq-dump/target
+; RUN: export KLEE_DUMP_DIR=%t.dumps/rust && mkdir -p %t.dumps/rust && cd %S/../../demos/klee-deq-dump && %cargo-verify --backend=klee 2>&1 | %FileCheck %s --check-prefix=RUST
+; RUST: VERIFICATION_RESULT: VERIFIED
+; RUN: ls %t.dumps/c_combine.1.smt2 %t.dumps/rust/result_combine.1.smt2
+; RUN: %python %rvt_dir/scripts/compare-klee-dumps.py %t.dumps/c_combine.1.smt2 %t.dumps/rust/result_combine.1.smt2 --pc-a %t.dumps/c_combine.1.pc.smt2 --pc-b %t.dumps/rust/result_combine.1.pc.smt2 | %FileCheck %s --check-prefix=EQUIV
+; EQUIV: EQUIV
