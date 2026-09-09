@@ -12,8 +12,13 @@ TGT = klee
 # this rule comes first to make sure that it is the default target
 default: rvt-$(TGT).bc
 
+# LLVM version to use for compiling/linking bitcode.
+# LLVM 18 matches both KLEE 3.x (built against LLVM 18) and
+# rustc 1.81 (which bundles LLVM 18).
+LLVM_VERSION ?= 18
+
 CC = clang-${LLVM_VERSION}
-CFLAGS = -flto=thin
+CFLAGS = -emit-llvm
 CFLAGS += -O1
 
 LINK = llvm-link-${LLVM_VERSION}

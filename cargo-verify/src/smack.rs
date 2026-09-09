@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::{ffi::OsString, fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use log::{info, warn};
 

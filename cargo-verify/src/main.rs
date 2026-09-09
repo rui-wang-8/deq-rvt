@@ -6,8 +6,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(command_access)]
-
 use std::{
     collections::HashSet,
     error, fmt,
@@ -98,12 +96,12 @@ pub struct Opt {
     #[structopt(long, value_name = "PATH", env = "SEAHORN_VERIFY_C_COMMON_DIR")]
     seahorn_verify_c_common_dir: Option<String>,
 
-    /// Which LLVM version to use (e.g., 10 or 11)
+    /// Which LLVM version to use (e.g., 18)
     #[structopt(
         long,
         value_name = "VERSION",
         env = "LLVM_VERSION",
-        default_value = "10"
+        default_value = "18"
     )]
     llvm_version: String,
 
@@ -711,23 +709,21 @@ fn build(opt: &Opt, package: &str, target: &str) -> CVResult<PathBuf> {
 /// vector is a pair `(a, b)` where `a` is the variable name and `b` is its
 /// value.
 fn get_build_envs(opt: &Opt) -> CVResult<Vec<(String, String)>> {
+    // Note: the Rust code being verified must be compiled by a rustc whose
+    // bundled LLVM version matches the LLVM version that KLEE was built
+    // against (LLVM 18: rustc 1.81.x).
     let mut rustflags = vec![
         "-Clto", // Generate linked bitcode for entire crate
         "-Cembed-bitcode=yes",
         "--emit=llvm-bc",
         "--cfg=verify", // Select verification versions of libraries
-        // "-Ccodegen-units=1",     // Optimize a bit more?
-        "-Zpanic_abort_tests", // Panic abort is simpler
-        "-Cpanic=abort",
-        "-Warithmetic-overflow", // Detecting errors is good!
         "-Coverflow-checks=yes",
-        "-Cno-vectorize-loops", // KLEE does not support vector intrinisics
+        "-Cno-vectorize-loops", // KLEE does not support vector intrinsics
         "-Cno-vectorize-slp",
-        "-Ctarget-feature=-sse3,-ssse3,-sse4.1,-sse4.2,-3dnow,-3dnowa,-avx,-avx2",
-        // use clang to link with LTO - to handle calls to C libraries
-        "-Clinker-plugin-lto",
-        format!("-Clinker=clang-{}", opt.llvm_version).as_str(),
-        format!("-Clink-arg=-fuse-ld=lld-{}", opt.llvm_version).as_str(),
+        // NOTE: rustc 1.81 (the LLVM-18 compiler KLEE 3.x is built against)
+        // uses legacy symbol mangling by default; rvt-patch-llvm's
+        // name-based stubbing relies on it.
+        "-Ctarget-feature=-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2",
     ]
     .join(" ");
 
@@ -737,6 +733,17 @@ fn get_build_envs(opt: &Opt) -> CVResult<Vec<(String, String)>> {
         // is not (and cannot be) provided in that library.
         // Defining this symbol allows code that uses is_symbolic to be linked.
         rustflags.push_str(" -Clink-arg=-Wl,--defsym=klee_is_symbolic=0");
+
+        // Native (non-KLEE) builds of the crate link against libkleeRuntest
+        // (used when replaying ktest files). Provide the search path.
+        let klee_dir = std::env::var("KLEE_DIR").unwrap_or_else(|_| {
+            std::env::var("RVT_DIR")
+                .map(|d| format!("{}/tools/klee", d))
+                .unwrap_or_default()
+        });
+        if !klee_dir.is_empty() {
+            rustflags.push_str(&format!(" -Lnative={}/lib", klee_dir));
+        }
     }
 
     if opt.backend == Backend::Smack {
@@ -757,6 +764,17 @@ fn get_build_envs(opt: &Opt) -> CVResult<Vec<(String, String)>> {
 
     Ok(vec![
         (String::from("RUSTFLAGS"), rustflags),
+        // Debug info in the generated bitcode trips up KLEE's own
+        // instrumentation of the module; disable it for the dev and test
+        // profiles (cargo enables debuginfo in these profiles by default
+        // since 1.70).
+        (String::from("CARGO_PROFILE_DEV_DEBUG"), String::from("0")),
+        (String::from("CARGO_PROFILE_TEST_DEBUG"), String::from("0")),
+        // Panic=abort via the cargo profile mechanism. NOTE: cargo ignores
+        // the panic setting for the test profile (so test targets unwind),
+        // which is fine: panics print "panicked at ..." and are flagged by
+        // cargo-verify as failures.
+        (String::from("CARGO_PROFILE_DEV_PANIC"), String::from("abort")),
         (String::from("CRATE_CC_NO_DEFAULTS"), String::from("true")),
         (String::from("CFLAGS"), String::from("-flto=thin")),
         (String::from("CC"), format!("clang-{}", opt.llvm_version)),
@@ -787,6 +805,14 @@ fn compile(opt: &Opt, package: &str, target: &str) -> CVResult<(PathBuf, Vec<Pat
     // FIXME: "=="?
     cmd.arg(format!("--target={}", target))
         .args(vec!["-v"; opt.verbose.saturating_sub(1)])
+        // Run cargo in the crate's directory so that a rust-toolchain.toml
+        // in the crate is honoured.
+        .current_dir(
+            opt.cargo_toml
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )
         .envs(get_build_envs(&opt)?)
         .output_info(&opt, Verbosity::Normal)?;
     // .env("PATH", ...)

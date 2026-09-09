@@ -177,7 +177,6 @@ fn run(
             // "--posix-runtime",
             // "--libcxx",
             "--libc=klee",
-            "--silent-klee-assume",
             "--disable-verify", // workaround https://github.com/klee/klee/issues/937
         ])
         .arg("--output-dir")
@@ -321,6 +320,21 @@ fn replay_klee(opt: &Opt, name: &str, ktest: &Path) -> CVResult<()> {
         None => OsString::from("--cfg=verify"),
     };
     cmd.env("RUSTFLAGS", rustflags).env("KTEST_FILE", ktest);
+
+    // libkleeRuntest is a shared library in KLEE >= 3.0.
+    let klee_dir = std::env::var("KLEE_DIR").unwrap_or_else(|_| {
+        std::env::var("RVT_DIR")
+            .map(|d| format!("{}/tools/klee", d))
+            .unwrap_or_default()
+    });
+    if !klee_dir.is_empty() {
+        let lib = format!("{}/lib", klee_dir);
+        let path = match std::env::var("LD_LIBRARY_PATH") {
+            Ok(p) if !p.is_empty() => format!("{}:{}", lib, p),
+            _ => lib,
+        };
+        cmd.env("LD_LIBRARY_PATH", path);
+    }
 
     // Note that we do not treat this as an error, because
     // the interesting case for replay is when KLEE had found an error.

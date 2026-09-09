@@ -119,7 +119,9 @@ make_verifier_nondet!(f64, klee_get_value_d);
 impl VerifierNonDet for bool {
     fn verifier_nondet(self) -> Self {
         let c = VerifierNonDet::verifier_nondet(0u8);
-        assume(c == 0 || c == 1);
+        // Branch-free (c <= 1 is a single comparison; `c == 0 || c == 1`
+        // would fork the execution on `c`).
+        assume(c <= 1);
         c == 1
     }
 
@@ -135,8 +137,13 @@ impl VerifierNonDet for bool {
 /// Assume that condition `cond` is true
 ///
 /// Any paths found must satisfy this assumption.
+///
+/// NOTE: the condition is passed to `klee_assume` via a *cast*, not a
+/// branch. A branch (`if cond { 1 } else { 0 }`) would fork off a state
+/// in which `cond` is false and call `klee_assume(0)`, which KLEE >= 3.0
+/// reports as "invalid klee_assume call (provably false)".
 pub fn assume(cond: bool) {
-    unsafe { klee_assume(if cond { 1 } else { 0 }) }
+    unsafe { klee_assume(cond as usize) }
 }
 
 /// Reject the current execution with a verification failure.

@@ -3,6 +3,11 @@
 /experiments
 /runtime/build
 
+# Local toolchain state (KLEE install, cargo registry cache, built tools)
+/.cargo-home
+/tools
+/simd_emulation/build
+
 Cargo.lock
 target/
 kleeout/
@@ -13,3 +18,6 @@ klee-last
 *.o
 .*un~
 .*swp
+kleeout*
+klee-bisect*/
+klee-trace*/

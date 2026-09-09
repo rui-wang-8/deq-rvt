@@ -309,6 +309,22 @@ pub fn list_tests(opt: &Opt, target: &str) -> CVResult<Vec<String>> {
         .args(vec!["-v"; opt.verbose])
         .envs(get_build_envs(&opt)?)
         .args(&["--", "--list"]);
+
+    // The test binary links against libkleeRuntest (a shared library in
+    // KLEE >= 3.0); make sure it can be found when cargo runs it.
+    let klee_dir = std::env::var("KLEE_DIR").unwrap_or_else(|_| {
+        std::env::var("RVT_DIR")
+            .map(|d| format!("{}/tools/klee", d))
+            .unwrap_or_default()
+    });
+    if !klee_dir.is_empty() {
+        let lib = format!("{}/lib", klee_dir);
+        let path = match std::env::var("LD_LIBRARY_PATH") {
+            Ok(p) if !p.is_empty() => format!("{}:{}", lib, p),
+            _ => lib,
+        };
+        cmd.env("LD_LIBRARY_PATH", path);
+    }
     // .arg("--exclude-should-panic")
     // .env("PATH", ...)
 

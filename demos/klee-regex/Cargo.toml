@@ -1,0 +1,11 @@
+[package]
+name = "klee-regex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+verification-annotations = { path = "../../verification-annotations" }
+regex = "1"
+
+[features]
+verifier-klee = ["verification-annotations/verifier-klee"]

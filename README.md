@@ -80,6 +80,65 @@ TL;DR
 
 There is also [some limited documentation](https://project-oak.github.io/rust-verification-tools/about.html) of how this works.
 
+## Verifying Rust code with KLEE (modernized toolchain)
+
+The original project pinned a 2021-era toolchain (LLVM 10, KLEE 2.x, a
+2021 nightly compiler). This tree has been updated to run with current
+KLEE and current Rust code. The supported (tested) toolchain matrix is:
+
+| Component       | Version                                   | Why                                        |
+|-----------------|-------------------------------------------|--------------------------------------------|
+| KLEE            | 3.x (built from master; ≥ 3.2 has a known issue on LLVM ≥ 17) | symbolic executor                          |
+| LLVM            | 18.x                                      | KLEE is built against it                   |
+| rustc           | 1.81.x                                    | bundles LLVM 18, so the emitted bitcode matches KLEE |
+| clang/llvm-link | 18.x                                      | compile/link the RVT runtime bitcode       |
+
+Changes from the original flow:
+
+- `cargo-verify` now targets LLVM 18 by default (`--llvm-version 18`),
+  drops the nightly-only `-Z` flags, and disables debug info in the
+  generated bitcode (cargo enables it by default since 1.70, which
+  breaks KLEE's instrumentation of the module).
+- `rvt-patch-llvm` is built against upstream inkwell (LLVM 18) and
+  handles opaque pointers; it strips debug info and rewrites SIMD
+  intrinsics (`llvm.x86.*`, `llvm.vector.*`, `llvm.bitreverse.*`) to
+  portable emulations.
+- `simd_emulation` is now written in C + a small `.ll` file (no nightly
+  `repr(simd)` compiler required).
+- The runtime adds stubs for modern `glibc`/`std` (e.g. `getrandom`,
+  which `std` resolves via an `extern_weak` symbol).
+
+Building the tools (KLEE, rvt-patch-llvm, cargo-verify):
+
+```
+# 1. KLEE 3.x against LLVM 18 (installs to tools/klee):
+#    cmake -S klee-src -B klee-build -DCMAKE_INSTALL_PREFIX=$PWD/tools/klee \
+#          -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm -DENABLE_SOLVER_Z3=ON ...
+#    make -C klee-build -j && make -C klee-build install
+#    NOTE: replace lib/Core/Executor.cpp's switch handling to use
+#    CE->getAPValue() (see below) - Rust emits i96 switches.
+
+# 2. RVT runtime bitcode and tools:
+make -C runtime TGT=klee
+make -C simd_emulation
+LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 cargo build --manifest-path rvt-patch-llvm/Cargo.toml
+cargo build --manifest-path cargo-verify/Cargo.toml
+cp rvt-patch-llvm/target/debug/rvt-patch-llvm cargo-verify/target/debug/cargo-verify tools/bin/
+```
+
+Verifying a crate (e.g. the bundled demos):
+
+```
+source scripts/rvt-klee-env.sh
+cargo-verify --backend=klee --manifest-path demos/klee-simple/Cargo.toml
+cargo-verify --backend=klee --manifest-path demos/klee-regex/Cargo.toml
+cargo-verify --backend=klee --manifest-path demos/klee-serde-json/Cargo.toml
+```
+
+The demos pin `rustc 1.81.0` via `rust-toolchain.toml`. The crate under
+test must be compiled by a rustc whose bundled LLVM matches the LLVM
+version KLEE was built against.
+
 ## License
 
 Licensed under either of

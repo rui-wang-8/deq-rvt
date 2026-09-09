@@ -1,0 +1,11 @@
+[package]
+name = "klee-serde-json"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+verification-annotations = { path = "../../verification-annotations" }
+serde_json = "1.0"
+
+[features]
+verifier-klee = ["verification-annotations/verifier-klee"]

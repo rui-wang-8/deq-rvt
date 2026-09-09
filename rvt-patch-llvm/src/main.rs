@@ -18,10 +18,10 @@ use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::module::Linkage;
 use inkwell::module::Module;
-use inkwell::types::{AnyType, FunctionType};
-use inkwell::values::{AnyValue, BasicValue, BasicValueEnum};
-use inkwell::values::{FunctionValue, GlobalValue, PointerValue};
-use inkwell::AddressSpace;
+use inkwell::types::FunctionType;
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, GlobalValue, PointerValue,
+};
 
 // Command line argument parsing
 #[derive(StructOpt)]
@@ -89,6 +89,11 @@ fn main() {
         .create_module_from_ir(memory_buffer)
         .expect("ERROR: failed to create module.");
 
+    // Verification backends don't need debug info, and it interferes with
+    // the transformations below (e.g. calls without a !dbg location) as
+    // well as with KLEE's own instrumentation of the module.
+    module.strip_debug_info();
+
     if opt.features {
         info!("Patching feature functions");
         stub_functions(
@@ -100,8 +105,7 @@ fn main() {
                 "std::std_detect::detect::check_for",
             ],
             |builder| {
-                builder.build_return(Some(&context.bool_type().const_int(0, false)));
-                ()
+                let _ = builder.build_return(Some(&context.bool_type().const_int(0, false)));
             },
         );
     }
@@ -113,18 +117,29 @@ fn main() {
     if opt.intrinsics {
         // intrinsics
         fn simd_intrinsic(name: &str) -> bool {
-            name.starts_with("llvm.x86") || name.starts_with("llvm.experimental.vector")
+            name.starts_with("llvm.x86")
+                || name.starts_with("llvm.experimental.vector")
+                || name.starts_with("llvm.vector.")
+                || name.starts_with("llvm.bitreverse.")
         }
         let is = get_function(&module, simd_intrinsic);
 
         // simd_emulation functions
         fn simd_emulation(name: &str) -> bool {
-            name.starts_with("llvm_x86") || name.starts_with("llvm_experimental.vector")
+            name.starts_with("llvm_x86")
+                || name.starts_with("llvm_experimental.vector")
+                || name.starts_with("llvm_vector_")
+                || name.starts_with("llvm_bitreverse_")
         }
         let rs = get_function(&module, simd_emulation);
-        let rs: HashMap<&str, FunctionValue> = rs
+        let rs: HashMap<String, FunctionValue> = rs
             .iter()
-            .filter_map(|f| f.get_name().to_str().ok().map(|nm| (nm, *f)))
+            .filter_map(|f| {
+                f.get_name()
+                    .to_str()
+                    .ok()
+                    .map(|nm| (nm.to_string(), *f))
+            })
             .collect();
 
         info!("Found simd_emulation functions {:?}", rs.keys());
@@ -132,10 +147,23 @@ fn main() {
         for i in is {
             let i_name = i.get_name();
             let r_name = i_name.to_str().expect("valid UTF8 symbol name");
-            let r_name: String = r_name.replace(".", "_");
-            if let Some(r) = rs.get(r_name.as_str()) {
+            let r_name: String = r_name.replace('.', "_");
+            if let Some(r) = rs.get(&r_name) {
                 info!("Replacing intrinsic {:?} with {}", i_name, r_name);
-                i.replace_all_uses_with(*r);
+                if i.get_type() == r.get_type() {
+                    i.replace_all_uses_with(*r);
+                } else {
+                    // The C ABI can change signatures (e.g. byval pointers
+                    // for large vectors); such intrinsics must be emulated
+                    // by functions with the exact IR signature, provided in
+                    // simd_emulation_ll.ll.
+                    info!(
+                        "Skipping replacement: incompatible types for {:?} ({} vs {})",
+                        i_name,
+                        i.get_type().print_to_string(),
+                        r.get_type().print_to_string()
+                    );
+                }
             } else {
                 info!("Did not find replacement for {:?}", i_name);
             }
@@ -209,11 +237,10 @@ fn handle_initializers(context: &Context, module: &mut Module) {
             .get_function("main")
             .expect("Unable to find 'main' function");
         let mut args = get_fn_args(main);
-        assert!(args.len() == 2); // We expect "i32 @main(i32 %0, i8** %1)"
-        let i8_type = context.i8_type();
-        let pi8_type = i8_type.ptr_type(AddressSpace::Generic);
-        let ppi8_type = pi8_type.ptr_type(AddressSpace::Generic);
-        args.push(ppi8_type.const_null().as_basic_value_enum());
+        assert!(args.len() == 2); // We expect "i32 @main(i32 %0, ptr %1)"
+        // Third argument (envp) of the init functions: null pointer.
+        let argv_type = args[1].into_pointer_value().get_type();
+        args.push(argv_type.const_null().into());
         insert_call_at_head(context, initializer, args, main);
         info!(
             "Inserted call to '{}' into 'main'",
@@ -237,13 +264,19 @@ fn collect_initializers<'a>(
         info!("Found initializer {:?}", v.get_name().to_str().unwrap());
     }
 
-    let fps: Vec<PointerValue> = vs.iter().map(get_initializer_function).collect();
+    // Look up the init functions by name (the section entries are
+    // pointers to functions; with opaque pointers we recover the
+    // function type via the name).
+    let fps: Vec<FunctionValue> = vs
+        .iter()
+        .filter_map(|v| get_initializer_function(module, v))
+        .collect();
 
     if !fps.is_empty() {
         let fp = fps[0];
 
-        // dereference the pointer type
-        let fp_type = fp.get_type().get_element_type().into_function_type();
+        // The type of the initializer functions.
+        let fp_type = fp.get_type();
         info!("Initializer type {:?}", fp_type.print_to_string());
 
         Some(build_fanout(context, module, nm, fp_type, fps))
@@ -255,8 +288,6 @@ fn collect_initializers<'a>(
 /// Collect variables that are assigned to a section whose name matches prefix
 fn collect_variables_in_section<'a>(module: &Module<'a>, prefix: &str) -> Vec<GlobalValue<'a>> {
     let mut vs = Vec::new();
-    // todo: should implement an iterator for global values so that the following loop
-    // becomes just iter().filter_map().filter_map().filter()
     let mut og = module.get_first_global();
     while let Some(g) = og {
         if let Some(s) = g.get_section() {
@@ -271,28 +302,44 @@ fn collect_variables_in_section<'a>(module: &Module<'a>, prefix: &str) -> Vec<Gl
     vs
 }
 
-/// Convert the contents of an initializer section to a function pointer.
+/// Convert the contents of an initializer section entry to the function
+/// it refers to, looked up by name in the module.
 ///
-/// Initializer sections contain structs where the first field is a function pointer cast to
-/// some other type.
-fn get_initializer_function<'a>(v: &GlobalValue<'a>) -> PointerValue<'a> {
-    let i = v.get_initializer().unwrap().into_struct_value();
-    assert!(i.get_num_operands() == 2); // expecting two fields in struct
-    let i = i.get_operand(0).unwrap();
-    assert!(i.get_num_operands() == 1); // expecting bitcast
-    let fp = i.get_operand(0).unwrap();
-    fp.into_pointer_value()
+/// rustc (LLVM 15+, opaque pointers) emits entries of the form
+///     constant <{ ptr }> <{ ptr @init_fn }>
+/// Older rustc emitted structs where the first field was a function
+/// pointer cast (bitcast) to some other type.
+fn get_initializer_function<'a>(
+    module: &Module<'a>,
+    v: &GlobalValue<'a>,
+) -> Option<FunctionValue<'a>> {
+    let i = v.get_initializer()?.into_struct_value();
+    let first = i.get_field_at_index(0)?;
+
+    let fn_ptr: PointerValue = match first {
+        BasicValueEnum::PointerValue(p) => p,
+        // ConstantExpr (e.g. bitcast of the function pointer) - older rustc
+        _ => first.into_pointer_value(),
+    };
+
+    let name = fn_ptr.get_name();
+    let name = name.to_str().ok()?;
+    if name.is_empty() {
+        return None;
+    }
+    module.get_function(name)
 }
 
-/// Given a list of functions of type 'ty', build a function that calls each function in order
+/// Given a list of functions of type 'ty', build a function that calls each
+/// function in order.
 ///
 /// Assumes (without checking) that return type is void
 ///
-///     define void @fanout(i32 %0, i32 %1) {
+///     define void @fanout(i32 %0, ptr %1, ptr %2) {
 ///     entry:
-///       call void @f1(i32 %0, i32 %1)
-///       call void @f2(i32 %0, i32 %1)
-///       call void @f3(i32 %0, i32 %1)
+///       call void @f1(i32 %0, ptr %1, ptr %2)
+///       call void @f2(i32 %0, ptr %1, ptr %2)
+///       call void @f3(i32 %0, ptr %1, ptr %2)
 ///       ret void
 ///     }
 ///
@@ -301,7 +348,7 @@ fn build_fanout<'a>(
     module: &mut Module<'a>,
     nm: &str,
     ty: FunctionType<'a>,
-    fps: Vec<PointerValue<'a>>,
+    fps: Vec<FunctionValue<'a>>,
 ) -> FunctionValue<'a> {
     let function = module.add_function(nm, ty, None);
     let args = get_fn_args(function);
@@ -310,24 +357,30 @@ fn build_fanout<'a>(
     builder.position_at_end(basic_block);
 
     for fp in fps {
-        builder.build_call(fp, &args, "");
-        builder.build_return(None);
-        // println!("Built function {:?}", function)
+        if fp.count_params() != args.len() as u32 {
+            info!(
+                "Skipping initializer {:?}: wrong number of parameters",
+                fp.get_name()
+            );
+            continue;
+        }
+        let _ = builder.build_call(fp, &args, "");
     }
+    let _ = builder.build_return(None);
 
     function
 }
 
-fn get_fn_args<'a>(function: FunctionValue<'a>) -> Vec<BasicValueEnum<'a>> {
+fn get_fn_args<'a>(function: FunctionValue<'a>) -> Vec<BasicMetadataValueEnum<'a>> {
     (0..function.count_params())
-        .map(|i| function.get_nth_param(i).unwrap())
+        .map(|i| function.get_nth_param(i).unwrap().into())
         .collect()
 }
 
 fn insert_call_at_head<'a>(
     context: &Context,
     f: FunctionValue<'a>,
-    args: Vec<BasicValueEnum<'a>>,
+    args: Vec<BasicMetadataValueEnum<'a>>,
     insertee: FunctionValue<'a>,
 ) {
     let bb = insertee
@@ -338,7 +391,7 @@ fn insert_call_at_head<'a>(
         .expect("Unable to find where to insert function call into function");
     let builder = context.create_builder();
     builder.position_before(&first_instruction);
-    builder.build_call(f, &args, "");
+    let _ = builder.build_call(f, &args, "");
 }
 
 ////////////////////////////////////////////////////////////////
@@ -350,7 +403,6 @@ fn insert_call_at_head<'a>(
 fn rust_mangle(rust_name: &str) -> String {
     let mangled = &rust_name
         .split("::")
-        .into_iter()
         .map(|x| format!("{}{}", x.len(), x))
         .collect::<Vec<String>>()
         .concat();
@@ -378,7 +430,7 @@ where
 {
     let builder = context.create_builder();
     for function in functions {
-        for fv in get_function_by_unmangled_name(&module, function) {
+        for fv in get_function_by_unmangled_name(module, function) {
             info!("Stubbing out function function {}", function);
             delete_body(&fv);
             let basic_block = context.append_basic_block(fv, "entry");
@@ -448,18 +500,18 @@ fn handle_panic(context: &Context, module: &Module) {
             .get_function("rust_begin_unwind")
             .into_iter()
             .chain(get_function_by_unmangled_name(
-                &module,
+                module,
                 "std::panicking::begin_panic",
             ))
             .chain(get_function_by_unmangled_name(
-                &module,
+                module,
                 "core::panicking::panic",
             ))
         {
             delete_body(&fv);
             let basic_block = context.append_basic_block(fv, "entry");
             builder.position_at_end(basic_block);
-            builder.build_call(spanic, &[], "call");
+            let _ = builder.build_call(spanic, &[], "call");
             builder.build_return(None);
 
             info!(
@@ -477,7 +529,6 @@ fn handle_panic(context: &Context, module: &Module) {
 fn replace_def_with_dec(module: &Module, re: &Regex) {
     for fun in get_function_by_regex(module, re) {
         delete_body(&fun);
-        fun.remove_personality_function();
         fun.set_linkage(Linkage::External);
         info!(
             "Removed the implementation of '{}'.",

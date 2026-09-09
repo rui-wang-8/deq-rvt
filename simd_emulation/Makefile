@@ -6,23 +6,33 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
-# this rule comes first to make sure that it is the default target
+# This rule comes first to make sure that it is the default target
 default: simd_emulation.bc
 
-RUSTC ?= rustc
-RSFLAGS = --emit=llvm-bc --crate-type=lib -O -Ctarget-feature=+sse2
-RSFLAGS += --edition=2018
+# LLVM version to use for compiling/linking bitcode.
+# LLVM 18 matches both KLEE 3.x (built against LLVM 18) and
+# rustc 1.81 (which bundles LLVM 18).
+LLVM_VERSION ?= 18
 
+CC = clang-${LLVM_VERSION}
+# NOTE: -O0 is deliberate: the optimizer would recognize the bitreverse
+# implementations below and re-emit the very intrinsics we are emulating.
+CFLAGS = -O0 -emit-llvm
+AS = llvm-as-${LLVM_VERSION}
 LINK = llvm-link-${LLVM_VERSION}
 
-RS_SRCS := $(wildcard src/*.rs)
-RS_OBJS := $(patsubst src/%.rs, build/%.bc, $(RS_SRCS))
+C_SRCS := $(wildcard *.c)
+LL_SRCS := $(wildcard *.ll)
+OBJS := $(patsubst %.c, build/%.o, $(C_SRCS))
+OBJS += $(patsubst %.ll, build/%.bc, $(LL_SRCS))
 
-OBJS := $(RS_OBJS)
-
-build/%.bc: src/%.rs
+build/%.o: %.c
 	mkdir -p $(dir $@)
-	$(RUSTC) $(RSFLAGS) $^ -o $@
+	$(CC) $(CFLAGS) $< -c -o $@
+
+build/%.bc: %.ll
+	mkdir -p $(dir $@)
+	$(AS) $< -o $@
 
 simd_emulation.bc: $(OBJS)
 	$(LINK) $(OBJS) -o $@
