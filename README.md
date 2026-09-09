@@ -139,6 +139,28 @@ The demos pin `rustc 1.81.0` via `rust-toolchain.toml`. The crate under
 test must be compiled by a rustc whose bundled LLVM matches the LLVM
 version KLEE was built against.
 
+- `demos/klee-simple` makes a value symbolic and checks an arithmetic
+  property (smoke test of the pipeline).
+- `demos/klee-regex` verifies `regex` 1.x properties (`find`/`is_match`/
+  `captures` agreement, span validity) over symbolic haystacks.
+- `demos/klee-serde-json` verifies `serde_json` 1.0.x parser/serializer
+  round-trips over symbolic JSON-ish input strings.
+
+Two local KLEE patches are applied to the `tools/klee` build (see
+`lib/Core/Executor.cpp` in the KLEE tree):
+
+1. `switch` instructions with >64-bit or negative concrete conditions
+   (rustc emits i96 switches) use the full-precision APInt instead of
+   `getZExtValue()` (which asserts). Upstream KLEE is affected.
+2. NOTE: the KLEE v3.2 release tag ships `assert(0)` stubs for the LLVM
+   >= 17 module instrumentation - build from the master branch instead.
+
+Known limitations (SMT array theory): symbolic regex *patterns* make
+regex-syntax compute byte-class tables from symbolic data, and haystacks
+longer than a few bytes make the search index those tables at symbolic
+positions; both can produce Z3 queries that do not terminate. The
+bundled demo sizes are chosen to verify cleanly.
+
 ## License
 
 Licensed under either of
