@@ -26,8 +26,12 @@ pub fn check_install() -> bool {
 
 /// Run Klee and replay
 pub fn verify(opt: &Opt, name: &str, entry: &str, bcfile: &Path) -> CVResult<Status> {
-    // KLEE output files are put in kleeout directory with filename `name`
-    let klee_dir = opt.cargo_toml.with_file_name("kleeout");
+    // KLEE output files are put in kleeout directory with filename `name`.
+    // The base directory defaults to the crate's directory; runners that
+    // must keep the crate read-only can override it with KLEE_OUT_BASE.
+    let klee_dir = std::env::var("KLEE_OUT_BASE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| opt.cargo_toml.with_file_name("kleeout"));
     fs::create_dir_all(&klee_dir)?;
 
     let out_dir = klee_dir.append(name);

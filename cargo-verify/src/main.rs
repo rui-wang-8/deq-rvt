@@ -800,6 +800,11 @@ fn compile(opt: &Opt, package: &str, target: &str) -> CVResult<(PathBuf, Vec<Pat
     if opt.tests || !opt.test.is_empty() {
         cmd.arg("--tests");
     }
+    if let Some(bin) = &opt.bin {
+        // Build only the requested binary: multi-bin crates would
+        // otherwise produce several bitcode files with a `main`.
+        cmd.arg("--bin").arg(bin);
+    }
     if opt.no_default_features {
         cmd.arg("--no-default-features");
     }

@@ -155,25 +155,37 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('a_dir')
     ap.add_argument('b_dir')
-    ap.add_argument('--tag', required=True)
+    ap.add_argument('--tag', required=True,
+                    help='dump tag of side A (and B unless --tag-b)')
+    ap.add_argument('--tag-b', default=None,
+                    help='dump tag of side B')
+    ap.add_argument('--mode', choices=['by-id', 'cross'], default='by-id',
+                    help='by-id: pair paths with equal state ids (same '
+                         'KLEE run / identical partitioning); '
+                         'cross: full cross-product with the path-'
+                         'compatibility gate (differently partitioned '
+                         'path sets)')
     ap.add_argument('--z3', default='z3')
     ap.add_argument('--timeout', type=int, default=120)
     ap.add_argument('--max-pairs', type=int, default=0)
     ap.add_argument('--max-side-paths', type=int, default=0)
     args = ap.parse_args()
 
-    ids_a = path_ids(args.a_dir, args.tag)
-    ids_b = path_ids(args.b_dir, args.tag)
+    tag_a = args.tag
+    tag_b = args.tag_b or args.tag
+    ids_a = path_ids(args.a_dir, tag_a)
+    ids_b = path_ids(args.b_dir, tag_b)
     if args.max_side_paths:
         ids_a = ids_a[:args.max_side_paths]
         ids_b = ids_b[:args.max_side_paths]
 
     sides = []
-    for ids, d in ((ids_a, args.a_dir), (ids_b, args.b_dir)):
+    for ids, d, tag in ((ids_a, args.a_dir, tag_a),
+                         (ids_b, args.b_dir, tag_b)):
         entries = []
         for pid in ids:
-            va = Path(d) / f'{args.tag}.{pid}.smt2'
-            pca = Path(d) / f'{args.tag}.{pid}.pc.smt2'
+            va = Path(d) / f'{tag}.{pid}.smt2'
+            pca = Path(d) / f'{tag}.{pid}.pc.smt2'
             decls, width, expr = parse_dump(va)
             pc = parse_pc(pca) if pca.exists() else 'true'
             entries.append((pid, decls, width, expr, pc))
@@ -195,9 +207,18 @@ def main():
                 all_decls.append(d)
     decl_block = '\n'.join(all_decls)
 
+    if args.mode == 'by-id':
+        pairs = []
+        for a in entries_a:
+            for b in entries_b:
+                if a[0] == b[0]:
+                    pairs.append((a, b))
+                    break
+    else:
+        pairs = [(a, b) for a in entries_a for b in entries_b]
+
     n_unsat = n_sat = n_timeout = n_incompatible = n_other = 0
-    for (ida, decls_a, wa, ea, pca), (idb, decls_b, wb, eb, pcb) in \
-            ((a, b) for a in entries_a for b in entries_b):
+    for (ida, decls_a, wa, ea, pca), (idb, decls_b, wb, eb, pcb) in pairs:
         if wa != wb:
             n_other += 1
             continue
