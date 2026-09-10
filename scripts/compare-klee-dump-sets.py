@@ -272,10 +272,8 @@ def main():
 
     decl_block_parts = []
     seen = set()
-    for decls, rn in ((declared_names(
-            [d for _, ds, *_ in entries_a for d in ds]), rename_a),
-            (declared_names(
-                [d for _, ds, *_ in entries_b for d in ds]), rename_b)):
+    for decls, rn in (([d for _, ds, *_ in entries_a for d in ds], rename_a),
+                       ([d for _, ds, *_ in entries_b for d in ds], rename_b)):
         for d in decls:
             rd = rn(d)
             if rd not in seen:
