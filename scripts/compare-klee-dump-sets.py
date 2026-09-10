@@ -63,6 +63,18 @@ def is_zero_bv(node):
     return node.startswith('(_ bv0 ')
 
 
+def strip_outer_zero_eq(node):
+    """Strip ONLY the dump's outer `(= (_ bv0 W) EXPR)` wrapper.
+
+    KLEE normalizes `x != 0` into `(= false (= (_ bv0 W) x))`, so inner
+    `(= (_ bv0 W) ...)` occurrences are real program semantics and must
+    be preserved."""
+    if (isinstance(node, list) and len(node) == 3 and node[0] == '='
+            and is_zero_bv(node[1])):
+        return node[2]
+    return node
+
+
 def replace_eq_zero(node):
     if not isinstance(node, list):
         return node
@@ -95,7 +107,7 @@ def parse_dump(path):
             break
     if assert_node is None:
         raise ValueError(f'{path}: no assert found')
-    expr = replace_eq_zero(assert_node)
+    expr = strip_outer_zero_eq(assert_node)
     m = re.search(r'\(_ bv0 (\d+)', text)
     width = int(m.group(1)) if m else 64
     decls = [l for l in text.splitlines()
@@ -104,6 +116,7 @@ def parse_dump(path):
 
 
 def parse_pc(path):
+    """Return (declarations, path-condition expression) from a pc dump."""
     text = Path(path).read_text()
     tokens = sexp_tokens(text)
     forms = []
@@ -114,11 +127,15 @@ def parse_pc(path):
             forms.append(node)
         else:
             i += 1
+    expr = None
     for root in forms:
         e = find_assert_expr(root)
         if e is not None:
-            return expr_to_str(e)
-    return None
+            expr = expr_to_str(e)
+            break
+    decls = [l for l in text.splitlines()
+             if l.strip().startswith('(declare-fun')]
+    return (decls, expr)
 
 
 def path_ids(d, tag):
@@ -187,7 +204,13 @@ def main():
             va = Path(d) / f'{tag}.{pid}.smt2'
             pca = Path(d) / f'{tag}.{pid}.pc.smt2'
             decls, width, expr = parse_dump(va)
-            pc = parse_pc(pca) if pca.exists() else 'true'
+            if pca.exists():
+                pc_decls, pc = parse_pc(pca)
+                # The pc dump declares the input arrays itself; merge its
+                # declarations (constant value dumps reference no arrays).
+                decls = decls + [d for d in pc_decls if d not in decls]
+            else:
+                pc = 'true'
             entries.append((pid, decls, width, expr, pc))
         sides.append(entries)
 
@@ -252,7 +275,7 @@ def main():
             break
 
     ok = n_sat == 0 and n_timeout == 0 and n_other == 0
-    print(f'DUMPSET_OK pairs={len(entries_a) * len(entries_b)} '
+    print(f'DUMPSET_OK pairs={len(pairs)} '
           f'unsat={n_unsat} sat={n_sat} timeout={n_timeout} '
           f'incompatible={n_incompatible} other={n_other} '
           f'all_ok={str(ok).lower()}')

@@ -25,3 +25,5 @@ klee-trace*/
 
 # deq dump output artifacts
 rust-dumps/
+
+__pycache__/

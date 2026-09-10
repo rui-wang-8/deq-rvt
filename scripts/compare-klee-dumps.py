@@ -57,6 +57,18 @@ def is_zero_bv(node):
     return node.startswith('(_ bv0 ')
 
 
+def strip_outer_zero_eq(node):
+    """Strip ONLY the dump's outer `(= (_ bv0 W) EXPR)` wrapper.
+
+    KLEE normalizes `x != 0` into `(= false (= (_ bv0 W) x))`, so inner
+    `(= (_ bv0 W) ...)` occurrences are real program semantics and must
+    be preserved."""
+    if (isinstance(node, list) and len(node) == 3 and node[0] == '='
+            and is_zero_bv(node[1])):
+        return node[2]
+    return node
+
+
 def replace_eq_zero(node):
     if not isinstance(node, list):
         return node
@@ -89,7 +101,7 @@ def load_value_dump(path, name):
             break
     if assert_node is None:
         raise ValueError(f'{path}: no assert found')
-    expr = replace_eq_zero(assert_node)
+    expr = strip_outer_zero_eq(assert_node)
     m = re.search(r'\(_ bv0 (\d+)', text)
     width = int(m.group(1)) if m else 64
 
