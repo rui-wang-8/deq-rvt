@@ -68,10 +68,21 @@ def strip_outer_zero_eq(node):
 
     KLEE normalizes `x != 0` into `(= false (= (_ bv0 W) x))`, so inner
     `(= (_ bv0 W) ...)` occurrences are real program semantics and must
-    be preserved."""
+    be preserved.  The dump printer emits (possibly nested) let-bindings
+    around the wrapper; every let level is kept so the result stays
+    self-contained."""
     if (isinstance(node, list) and len(node) == 3 and node[0] == '='
             and is_zero_bv(node[1])):
         return node[2]
+    if (isinstance(node, list) and len(node) >= 3 and node[0] == 'let'):
+        inner = strip_outer_zero_eq(node[2])
+        return ['let', node[1], inner]
+    return node
+
+
+def unwrap_lets(node):
+    while (isinstance(node, list) and len(node) >= 3 and node[0] == 'let'):
+        node = node[2]
     return node
 
 
@@ -108,8 +119,13 @@ def parse_dump(path):
     if assert_node is None:
         raise ValueError(f'{path}: no assert found')
     expr = strip_outer_zero_eq(assert_node)
-    m = re.search(r'\(_ bv0 (\d+)', text)
-    width = int(m.group(1)) if m else 64
+    # The width comes from the OUTER wrapper, not from any inner
+    # `(_ bv0 W)` constants that may appear inside let-bindings.
+    width = 64
+    node = unwrap_lets(assert_node)
+    if (isinstance(node, list) and len(node) == 3 and node[0] == '='
+            and is_zero_bv(node[1])):
+        width = int(node[1][2]) if len(node[1]) == 3 else width
     decls = [l for l in text.splitlines()
              if l.strip().startswith('(declare-fun')]
     return decls, width, expr_to_str(expr)

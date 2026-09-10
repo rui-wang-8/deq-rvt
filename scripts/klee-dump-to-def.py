@@ -65,10 +65,16 @@ def strip_outer_zero_eq(node):
 
     KLEE normalizes `x != 0` into `(= false (= (_ bv0 W) x))`, so inner
     `(= (_ bv0 W) ...)` occurrences are real program semantics and must
-    be preserved."""
+    be preserved.  The dump printer emits let-bindings for shared
+    sub-expressions, so the wrapper may sit inside a `(let ...)` form;
+    the bindings are carried along so the result stays self-contained."""
     if (isinstance(node, list) and len(node) == 3 and node[0] == '='
             and is_zero_bv(node[1])):
         return node[2]
+    if (isinstance(node, list) and len(node) >= 3 and node[0] == 'let'
+            and isinstance(node[2], list) and len(node[2]) == 3
+            and node[2][0] == '=' and is_zero_bv(node[2][1])):
+        return ['let', node[1], node[2][2]]
     return node
 
 
@@ -117,8 +123,13 @@ def main():
 
     width = args.width
     if width is None:
-        m = re.search(r'\(_ bv0 (\d+)', text)
-        width = int(m.group(1)) if m else 64
+        # The width comes from the OUTER wrapper, not from any inner
+        # `(_ bv0 W)` constants inside let-bindings.
+        width = 64
+        node = unwrap_lets(assert_node)
+        if (isinstance(node, list) and len(node) == 3 and node[0] == '='
+                and is_zero_bv(node[1])):
+            width = int(node[1][2]) if len(node[1]) == 3 else width
 
     keep = []
     for line in text.splitlines():

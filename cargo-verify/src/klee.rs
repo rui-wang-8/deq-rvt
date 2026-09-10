@@ -181,6 +181,11 @@ fn run(
             // "--posix-runtime",
             // "--libcxx",
             "--libc=klee",
+            // KLEE >= 3.0 reports klee_assume(0) as an error; harnesses
+            // that build conditions with short-circuit branches fork off
+            // a path where the condition is concretely false. Restore the
+            // classic semantics: such paths terminate silently.
+            "--silent-klee-assume",
             "--disable-verify", // workaround https://github.com/klee/klee/issues/937
         ])
         .arg("--output-dir")

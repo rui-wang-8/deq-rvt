@@ -13,14 +13,15 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
+
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::module::Linkage;
 use inkwell::module::Module;
-use inkwell::types::FunctionType;
+use inkwell::types::{BasicMetadataTypeEnum, FunctionType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, GlobalValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, GlobalValue, PointerValue, ValueKind,
 };
 
 // Command line argument parsing
@@ -100,8 +101,13 @@ fn main() {
             &context,
             &module,
             &[
-                "std::std_detect::detect::arch::__is_feature_detected::avx2",
-                "std::std_detect::detect::arch::__is_feature_detected::ssse3",
+                // x86 feature detection (Rust std puts these in arch::x86).
+                "std::std_detect::detect::arch::x86::__is_feature_detected::avx2",
+                "std::std_detect::detect::arch::x86::__is_feature_detected::sse2",
+                "std::std_detect::detect::arch::x86::__is_feature_detected::ssse3",
+                // SHA-NI dispatch (sha2 crate: x86 backend selection).
+                "std::std_detect::detect::arch::x86::__is_feature_detected::sha",
+                "sha2::sha256::x86::shani_cpuid::get",
                 "std::std_detect::detect::check_for",
             ],
             |builder| {
@@ -144,6 +150,7 @@ fn main() {
 
         info!("Found simd_emulation functions {:?}", rs.keys());
 
+        let builder = context.create_builder();
         for i in is {
             let i_name = i.get_name();
             let r_name = i_name.to_str().expect("valid UTF8 symbol name");
@@ -154,15 +161,80 @@ fn main() {
                     i.replace_all_uses_with(*r);
                 } else {
                     // The C ABI can change signatures (e.g. byval pointers
-                    // for large vectors); such intrinsics must be emulated
-                    // by functions with the exact IR signature, provided in
-                    // simd_emulation_ll.ll.
-                    info!(
-                        "Skipping replacement: incompatible types for {:?} ({} vs {})",
-                        i_name,
-                        i.get_type().print_to_string(),
-                        r.get_type().print_to_string()
-                    );
+                    // for large vectors): build a trampoline with the
+                    // intrinsic's exact signature that forwards to the
+                    // emulation function through byval alloca slots.
+                    let ft = i.get_type();
+                    let rt = r.get_type();
+                    let iparams: Vec<BasicMetadataTypeEnum> = ft.get_param_types();
+                    let rparams: Vec<BasicMetadataTypeEnum> = rt.get_param_types();
+                    if ft.get_return_type() == rt.get_return_type()
+                        && iparams.len() == rparams.len()
+                    {
+                        let tramp_name = format!("{}_tramp", r_name);
+                        let tramp = module.add_function(&tramp_name, ft, None);
+                        let basic_block =
+                            context.append_basic_block(tramp, "entry");
+                        builder.position_at_end(basic_block);
+                        let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+                        let mut ok = true;
+                        for (idx, (it, rt)) in
+                            iparams.iter().zip(rparams.iter()).enumerate()
+                        {
+                            let arg = tramp.get_nth_param(idx as u32).unwrap();
+                            if it == rt {
+                                args.push(arg.into());
+                            } else if rt.is_pointer_type() {
+                                let slot = if it.is_vector_type() {
+                                    builder.build_alloca(it.into_vector_type(), "tmp")
+                                } else if it.is_array_type() {
+                                    builder.build_alloca(it.into_array_type(), "tmp")
+                                } else if it.is_struct_type() {
+                                    builder.build_alloca(it.into_struct_type(), "tmp")
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                                .unwrap();
+                                builder.build_store(slot, arg).unwrap();
+                                args.push(slot.into());
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            let call =
+                                builder.build_call(*r, &args, "call").unwrap();
+                            if let ValueKind::Basic(bv) = call.try_as_basic_value() {
+                                builder.build_return(Some(&bv)).unwrap();
+                                i.replace_all_uses_with(tramp);
+                                info!(
+                                    "Replacing intrinsic {:?} with trampoline {}",
+                                    i_name, tramp_name
+                                );
+                            } else {
+                                info!(
+                                    "Skipping replacement: could not build return for {:?}",
+                                    i_name
+                                );
+                            }
+                        } else {
+                            info!(
+                                "Skipping replacement: incompatible types for {:?} ({} vs {})",
+                                i_name,
+                                i.get_type().print_to_string(),
+                                r.get_type().print_to_string()
+                            );
+                        }
+                    } else {
+                        info!(
+                            "Skipping replacement: incompatible types for {:?} ({} vs {})",
+                            i_name,
+                            i.get_type().print_to_string(),
+                            r.get_type().print_to_string()
+                        );
+                    }
                 }
             } else {
                 info!("Did not find replacement for {:?}", i_name);
@@ -463,15 +535,21 @@ fn get_function_by_regex<'ctx>(module: &'ctx Module, re: &Regex) -> Vec<Function
 
 /// Find a function whose name matches a Rust-mangled name
 fn get_function_by_unmangled_name<'ctx>(
-    module: &'ctx Module,
+    module: &Module<'ctx>,
     prefix: &str,
 ) -> Vec<FunctionValue<'ctx>> {
-    let prefix = format!("{}17h", rust_mangle(prefix));
-    get_function(module, |name| name.starts_with(&prefix))
+    // rustc's legacy mangling omits the "std" crate prefix (e.g.
+    // std::std_detect::... mangles as _ZN10std_detect...), so try both the
+    // full path and the path with the leading "std::" stripped.
+    let mut prefixes = vec![format!("{}17h", rust_mangle(prefix))];
+    if let Some(stripped) = prefix.strip_prefix("std::") {
+        prefixes.push(format!("{}17h", rust_mangle(stripped)));
+    }
+    get_function(module, |name| prefixes.iter().any(|p| name.starts_with(p)))
 }
 
 /// Find a function whose name satisfies predicate `is_match`
-fn get_function<'ctx, P>(module: &'ctx Module, is_match: P) -> Vec<FunctionValue<'ctx>>
+fn get_function<'ctx, P>(module: &Module<'ctx>, is_match: P) -> Vec<FunctionValue<'ctx>>
 where
     P: Fn(&str) -> bool,
 {
