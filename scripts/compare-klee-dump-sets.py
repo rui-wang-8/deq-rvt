@@ -12,6 +12,14 @@ compatibility gate (the deq INCOMPATIBLE_PATHS rule):
     if   pc_a AND pc_b AND va!=vb is UNSAT -> ok (agree on the overlap)
     else                                      -> genuine disequivalence
 
+Value dumps can contain array-initializer asserts (for the concrete
+constant arrays the expression reads) in addition to the final value
+assert; all of those asserts are constraints and are included.  The two
+sides name their arrays independently (KLEE numbers const arrays per
+run), so all arrays except the shared inputs (names starting with
+"stdin") are renamed with a per-side prefix before the queries are
+built.
+
 Usage: compare-klee-dump-sets.py A_DIR B_DIR --tag TAG [--z3 z3]
        [--timeout 120] [--max-pairs N] [--max-side-paths N]
 
@@ -86,21 +94,13 @@ def unwrap_lets(node):
     return node
 
 
-def replace_eq_zero(node):
-    if not isinstance(node, list):
-        return node
-    if len(node) == 3 and node[0] == '=' and is_zero_bv(node[1]):
-        return replace_eq_zero(node[2])
-    return [replace_eq_zero(x) for x in node]
-
-
 def expr_to_str(node):
     if isinstance(node, list):
         return '(' + ' '.join(expr_to_str(x) for x in node) + ')'
     return node
 
 
-def parse_dump(path):
+def _parse_forms(path):
     text = Path(path).read_text()
     tokens = sexp_tokens(text)
     forms = []
@@ -111,13 +111,29 @@ def parse_dump(path):
             forms.append(node)
         else:
             i += 1
+    decls = [l for l in text.splitlines()
+             if l.strip().startswith('(declare-fun')]
+    return forms, decls
+
+
+def parse_dump(path):
+    """Return (declarations, width, value-expr, extra-asserts).
+
+    The value assert is the LAST assert of the dump; any earlier asserts
+    (constant-array initializers) are constraints and are returned as
+    extra-asserts strings."""
+    forms, decls = _parse_forms(path)
+    asserts = [expr_to_str(find_assert_expr(root)) for root in forms
+               if find_assert_expr(root) is not None]
+    if not asserts:
+        raise ValueError(f'{path}: no assert found')
+    value_assert = asserts[-1]
+    extras = asserts[:-1]
     assert_node = None
     for root in forms:
-        assert_node = find_assert_expr(root)
-        if assert_node is not None:
-            break
-    if assert_node is None:
-        raise ValueError(f'{path}: no assert found')
+        a = find_assert_expr(root)
+        if a is not None:
+            assert_node = a
     expr = strip_outer_zero_eq(assert_node)
     # The width comes from the OUTER wrapper, not from any inner
     # `(_ bv0 W)` constants that may appear inside let-bindings.
@@ -126,32 +142,42 @@ def parse_dump(path):
     if (isinstance(node, list) and len(node) == 3 and node[0] == '='
             and is_zero_bv(node[1])):
         width = int(node[1][2]) if len(node[1]) == 3 else width
-    decls = [l for l in text.splitlines()
-             if l.strip().startswith('(declare-fun')]
-    return decls, width, expr_to_str(expr)
+    return decls, width, expr_to_str(expr), extras
 
 
 def parse_pc(path):
-    """Return (declarations, path-condition expression) from a pc dump."""
-    text = Path(path).read_text()
-    tokens = sexp_tokens(text)
-    forms = []
-    i = 0
-    while i < len(tokens):
-        if tokens[i] == '(':
-            node, i = parse_sexp(tokens, i)
-            forms.append(node)
-        else:
-            i += 1
-    expr = None
-    for root in forms:
-        e = find_assert_expr(root)
-        if e is not None:
-            expr = expr_to_str(e)
-            break
-    decls = [l for l in text.splitlines()
-             if l.strip().startswith('(declare-fun')]
-    return (decls, expr)
+    """Return (declarations, path-condition expression) from a pc dump.
+
+    All asserts in the file are part of the path condition."""
+    forms, decls = _parse_forms(path)
+    asserts = [expr_to_str(find_assert_expr(root)) for root in forms
+               if find_assert_expr(root) is not None]
+    if not asserts:
+        return (decls, None)
+    if len(asserts) == 1:
+        return (decls, asserts[0])
+    return (decls, '(and ' + ' '.join(asserts) + ')')
+
+
+def make_renamer(names, prefix):
+    """Rename every declared array (except shared 'stdin*' inputs) with a
+    per-side prefix so the two sides' identically-named constant arrays
+    stay independent."""
+    names = sorted({n for n in names if not n.startswith('stdin')},
+                   key=len, reverse=True)
+    if not names:
+        return lambda t: t
+    pat = re.compile(r'\b(' + '|'.join(re.escape(n) for n in names) + r')\b')
+    return lambda t: pat.sub(lambda m: prefix + m.group(1), t)
+
+
+def declared_names(decls):
+    names = set()
+    for d in decls:
+        m = re.match(r'\(declare-fun\s+(\S+)', d)
+        if m:
+            names.add(m.group(1))
+    return names
 
 
 def path_ids(d, tag):
@@ -219,15 +245,15 @@ def main():
         for pid in ids:
             va = Path(d) / f'{tag}.{pid}.smt2'
             pca = Path(d) / f'{tag}.{pid}.pc.smt2'
-            decls, width, expr = parse_dump(va)
+            decls, width, expr, extras = parse_dump(va)
             if pca.exists():
                 pc_decls, pc = parse_pc(pca)
                 # The pc dump declares the input arrays itself; merge its
-                # declarations (constant value dumps reference no arrays).
-                decls = decls + [d for d in pc_decls if d not in decls]
+                # declarations.
+                decls = decls + [dd for dd in pc_decls if dd not in decls]
             else:
                 pc = 'true'
-            entries.append((pid, decls, width, expr, pc))
+            entries.append((pid, decls, width, expr, pc, extras))
         sides.append(entries)
 
     entries_a, entries_b = sides
@@ -236,15 +262,26 @@ def main():
               'all_ok=false')
         return 1
 
-    # Deduplicate the declaration sets up front (shared input arrays).
-    all_decls = []
+    # Rename each side's constant arrays independently; shared 'stdin*'
+    # inputs keep their names so the two sides are compared on the same
+    # input variables.
+    rename_a = make_renamer(declared_names(
+        [d for _, decls, *_ in entries_a for d in decls]), 'a_')
+    rename_b = make_renamer(declared_names(
+        [d for _, decls, *_ in entries_b for d in decls]), 'b_')
+
+    decl_block_parts = []
     seen = set()
-    for _, decls, _, _, _ in entries_a + entries_b:
+    for decls, rn in ((declared_names(
+            [d for _, ds, *_ in entries_a for d in ds]), rename_a),
+            (declared_names(
+                [d for _, ds, *_ in entries_b for d in ds]), rename_b)):
         for d in decls:
-            if d not in seen:
-                seen.add(d)
-                all_decls.append(d)
-    decl_block = '\n'.join(all_decls)
+            rd = rn(d)
+            if rd not in seen:
+                seen.add(rd)
+                decl_block_parts.append(rd)
+    decl_block = '\n'.join(decl_block_parts)
 
     if args.mode == 'by-id':
         pairs = []
@@ -255,17 +292,27 @@ def main():
                     break
     else:
         pairs = [(a, b) for a in entries_a for b in entries_b]
+    if args.max_pairs:
+        pairs = pairs[:args.max_pairs]
 
     n_unsat = n_sat = n_timeout = n_incompatible = n_other = 0
-    for (ida, decls_a, wa, ea, pca), (idb, decls_b, wb, eb, pcb) in pairs:
+    for a, b in pairs:
+        ida, decls_a, wa, ea, pca, extras_a = a
+        idb, decls_b, wb, eb, pcb, extras_b = b
         if wa != wb:
             n_other += 1
             continue
+        ea2, pca2 = rename_a(ea), rename_a(pca)
+        eb2, pcb2 = rename_b(eb), rename_b(pcb)
+        extra_block = ''.join(f'(assert {rename_a(x)})\n'
+                              for x in extras_a) \
+            + ''.join(f'(assert {rename_b(x)})\n' for x in extras_b)
         query = ('(set-logic QF_AUFBV)\n(set-option :produce-models true)\n'
                  + decl_block + '\n'
-                 + f'(define-fun va () (_ BitVec {wa}) {ea})\n'
-                 + f'(define-fun vb () (_ BitVec {wb}) {eb})\n'
-                 + f'(assert {pca})\n(assert {pcb})\n'
+                 + extra_block
+                 + f'(define-fun va () (_ BitVec {wa}) {ea2})\n'
+                 + f'(define-fun vb () (_ BitVec {wb}) {eb2})\n'
+                 + f'(assert {pca2})\n(assert {pcb2})\n'
                  + '(assert (not (= va vb)))\n(check-sat)\n')
         v = run_z3(query, args.z3, args.timeout)
         if v == 'unsat':
@@ -278,7 +325,8 @@ def main():
             # the same time.
             compat = ('(set-logic QF_AUFBV)\n(set-option :produce-models true)\n'
                       + decl_block + '\n'
-                      + f'(assert {pca})\n(assert {pcb})\n(check-sat)\n')
+                      + extra_block
+                      + f'(assert {pca2})\n(assert {pcb2})\n(check-sat)\n')
             cv = run_z3(compat, args.z3, args.timeout)
             if cv == 'unsat':
                 n_incompatible += 1
