@@ -113,9 +113,9 @@ def main():
             i += 1
     assert_node = None
     for root in forms:
-        assert_node = find_assert_expr(root)
-        if assert_node is not None:
-            break
+        a = find_assert_expr(root)
+        if a is not None:
+            assert_node = a
     if assert_node is None:
         print('no assert found', file=sys.stderr)
         return 2
