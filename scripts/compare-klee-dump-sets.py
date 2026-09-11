@@ -95,9 +95,30 @@ def unwrap_lets(node):
 
 
 def expr_to_str(node):
-    if isinstance(node, list):
-        return '(' + ' '.join(expr_to_str(x) for x in node) + ')'
-    return node
+    """Render an S-expression iteratively.
+
+    CPython 3.12 enforces a *C* recursion limit that `sys.setrecursionlimit`
+    does not raise, and a generator expression per level (the obvious
+    `' '.join(expr_to_str(x) for x in node)`) trips it on KLEE's deeply nested
+    memory-model dumps well before the Python limit.  An explicit stack keeps
+    this O(1) in C-stack depth.
+    """
+    out = []
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if item is None:
+            out.append(')')
+        elif isinstance(item, list):
+            out.append('(')
+            stack.append(None)
+            for k in range(len(item) - 1, -1, -1):
+                stack.append(item[k])
+                if k:
+                    stack.append(' ')
+        else:
+            out.append(str(item))
+    return ''.join(out)
 
 
 def _parse_forms(path):
@@ -409,5 +430,31 @@ def main():
     return 0 if ok else 1
 
 
+def _run_with_big_stack():
+    """Run main() on a thread with a large stack and a raised recursion limit.
+
+    KLEE dumps of memory-heavy paths nest tens of thousands of `store` /
+    `concat` nodes, and every stage of this script (parsing, printing, the
+    renamer walk) is a recursive descent over them.
+    """
+    import threading
+    box = {}
+
+    def work():
+        sys.setrecursionlimit(400000)
+        try:
+            box['rc'] = main()
+        except BaseException as exc:
+            box['exc'] = exc
+
+    threading.stack_size(1024 * 1024 * 1024)
+    t = threading.Thread(target=work)
+    t.start()
+    t.join()
+    if 'exc' in box:
+        raise box['exc']
+    return box.get('rc', 1)
+
+
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(_run_with_big_stack())
