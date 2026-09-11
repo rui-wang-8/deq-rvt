@@ -186,3 +186,32 @@ long long llvm_vector_reduce_add_v2i64(i64x2 a) {
  * in simd_emulation_ll.ll with exact IR signatures: on x86-64, the C ABI
  * passes 256-bit vectors indirectly (byval pointer) and passes <2 x i32>
  * as a `double`, changing the IR signature. */
+
+/*
+ * Add-with-carry / subtract-with-borrow intrinsics used by big-integer
+ * limb arithmetic (e.g. num-bigint on 64-bit limbs):
+ *
+ *   call i8 @llvm.x86.addcarry.64(i8 %carry_in, i64 %a, i64 %b, ptr %out)
+ *   call i8 @llvm.x86.subborrow.64(i8 %borrow_in, i64 %a, i64 %b, ptr %out)
+ *
+ * Both write the low 64 bits of the (borrowing) result to *out and return
+ * the carry/borrow bit. KLEE does not implement these natively and would
+ * otherwise report "external call with symbolic argument".
+ */
+unsigned char llvm_x86_addcarry_64(unsigned char carry_in,
+                                   unsigned long long a,
+                                   unsigned long long b,
+                                   unsigned long long *out) {
+    unsigned __int128 sum = (unsigned __int128)a + b + carry_in;
+    *out = (unsigned long long)sum;
+    return (unsigned char)(sum >> 64);
+}
+
+unsigned char llvm_x86_subborrow_64(unsigned char borrow_in,
+                                    unsigned long long a,
+                                    unsigned long long b,
+                                    unsigned long long *out) {
+    unsigned __int128 diff = (unsigned __int128)a - b - borrow_in;
+    *out = (unsigned long long)diff;
+    return (unsigned char)(diff >> 64);
+}
