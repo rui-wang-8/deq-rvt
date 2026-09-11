@@ -300,3 +300,44 @@ entry:
   %s = add i8 %v0, %v1
   ret i8 %s
 }
+
+; Add-with-carry / subtract-with-borrow intrinsics used by big-integer limb
+; arithmetic (e.g. num-bigint on 64-bit limbs). rustc emits the two-result
+; form:
+;
+;   %r = call { i8, i64 } @llvm.x86.addcarry.64(i8 %carry, i64 %a, i64 %b)
+;   %r = call { i8, i64 } @llvm.x86.subborrow.64(i8 %borrow, i64 %a, i64 %b)
+;
+; KLEE does not implement these natively and reports "external call with
+; symbolic argument". rvt-patch-llvm --intrinsics rewrites the calls to the
+; same-named functions below.
+
+define { i8, i64 } @llvm_x86_addcarry_64(i8 %c, i64 %a, i64 %b) {
+  %z = zext i8 %c to i128
+  %za = zext i64 %a to i128
+  %zb = zext i64 %b to i128
+  %s1 = add i128 %za, %zb
+  %s2 = add i128 %s1, %z
+  %lo = trunc i128 %s2 to i64
+  %hi = lshr i128 %s2, 64
+  %c8 = trunc i128 %hi to i8
+  %r0 = insertvalue { i8, i64 } undef, i8 %c8, 0
+  %r1 = insertvalue { i8, i64 } %r0, i64 %lo, 1
+  ret { i8, i64 } %r1
+}
+
+define { i8, i64 } @llvm_x86_subborrow_64(i8 %c, i64 %a, i64 %b) {
+  %z = zext i8 %c to i128
+  %za = zext i64 %a to i128
+  %zb = zext i64 %b to i128
+  %s1 = sub i128 %za, %zb
+  %d2 = sub i128 %s1, %z
+  %lo = trunc i128 %d2 to i64
+  ; borrow iff the true difference is negative, i.e. the wrapped result
+  ; exceeds a (a < 2^64 <= wrapped values).
+  %neg = icmp ugt i128 %d2, %za
+  %c8 = zext i1 %neg to i8
+  %r0 = insertvalue { i8, i64 } undef, i8 %c8, 0
+  %r1 = insertvalue { i8, i64 } %r0, i64 %lo, 1
+  ret { i8, i64 } %r1
+}
