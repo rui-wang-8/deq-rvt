@@ -276,6 +276,12 @@ def run_z3(query, z3, timeout):
     finally:
         Path(qpath).unlink(missing_ok=True)
     out = (r.stdout + r.stderr).strip()
+    # A malformed query (e.g. a reference to an undeclared array) makes Z3 print
+    # (error ...) and then still answer for whatever part it did parse, which
+    # would let a broken comparison masquerade as a proof.  Any Z3 error is
+    # therefore a failure of the comparison, not an answer.
+    if '(error' in out or 'error:' in out:
+        return 'z3_error'
     if 'unsat' in out:
         return 'unsat'
     if 'sat' in out:
@@ -413,9 +419,18 @@ def main():
             cv = run_z3(compat, args.z3, args.timeout)
             if cv == 'unsat':
                 n_incompatible += 1
-            else:
+            elif cv == 'sat':
                 n_sat += 1
                 print(f'DISEQUIVALENCE: path {ida} vs {idb}', file=sys.stderr)
+            elif cv == 'timeout':
+                # The disequality query answered SAT but the compatibility of
+                # the two path conditions could not be decided: that is not
+                # evidence of a divergence.
+                n_timeout += 1
+            else:
+                n_other += 1
+        elif v == 'z3_error':
+            n_other += 1
         else:
             n_other += 1
         if n_sat:
