@@ -171,6 +171,42 @@ def make_renamer(names, prefix):
     return lambda t: pat.sub(lambda m: prefix + m.group(1), t)
 
 
+def make_byte_input_normalizer(array_name, domain_width=32):
+    """Rewrite `(select ARRAY (_ bvK W))` into the byte variable `stdinK`.
+
+    KLEE models a symbolic input as an array (`stdin`), while SymCC (via deq's
+    SMT2 hook) models it as the bytes `stdin0..stdinN`. Normalizing both sides
+    to the same byte variables lets the dumps of the two engines be compared.
+    """
+    sel = re.compile(
+        r'\(select\s+' + re.escape(array_name) + r'\s+\(_\s*bv(\d+)\s+' +
+        str(domain_width) + r'\)\s*\)')
+    return lambda t: sel.sub(lambda m: f'stdin{m.group(1)}', t)
+
+
+def drop_array_decl(decls, array_name):
+    """Drop the declaration of ARRAY and declare the byte variables instead."""
+    pat = re.compile(r'\(declare-fun\s+' + re.escape(array_name) + r'\s')
+    kept = [d for d in decls if not pat.match(d)]
+    if len(kept) == len(decls):
+        return decls
+    return kept
+
+
+def add_byte_decls(decls, text):
+    """Add (declare-fun stdinK () (_ BitVec 8)) for every stdinK in text."""
+    have = set()
+    for d in decls:
+        m = re.match(r'\(declare-fun\s+(stdin\d+)\s', d)
+        if m:
+            have.add(m.group(1))
+    out = list(decls)
+    for name in sorted(set(re.findall(r'\bstdin(\d+)\b', text)) -
+                       {h[len('stdin'):] for h in have}, key=int):
+        out.append(f'(declare-fun stdin{name} () (_ BitVec 8))')
+    return out
+
+
 def declared_names(decls):
     names = set()
     for d in decls:
@@ -224,6 +260,10 @@ def main():
                          'cross: full cross-product with the path-'
                          'compatibility gate (differently partitioned '
                          'path sets)')
+    ap.add_argument('--byte-inputs', default=None, metavar='ARRAY',
+                    help='normalize (select ARRAY (_ bvK 32)) reads into the '
+                         'byte variables stdinK on both sides, so KLEE array '
+                         'inputs can be compared with SymCC byte inputs')
     ap.add_argument('--z3', default='z3')
     ap.add_argument('--timeout', type=int, default=120)
     ap.add_argument('--max-pairs', type=int, default=0)
@@ -253,6 +293,12 @@ def main():
                 decls = decls + [dd for dd in pc_decls if dd not in decls]
             else:
                 pc = 'true'
+            if args.byte_inputs:
+                norm = make_byte_input_normalizer(args.byte_inputs)
+                expr, pc = norm(expr), norm(pc)
+                extras = [norm(x) for x in extras]
+                decls = add_byte_decls(drop_array_decl(decls, args.byte_inputs),
+                                       expr + pc + ' '.join(extras))
             entries.append((pid, decls, width, expr, pc, extras))
         sides.append(entries)
 
