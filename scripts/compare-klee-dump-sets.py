@@ -159,6 +159,22 @@ def parse_pc(path):
     return (decls, '(and ' + ' '.join(asserts) + ')')
 
 
+def widen_to(expr, width, target):
+    """Zero-extend a value expression to `target` bits.
+
+    KLEE's SMT printer simplifies `(= (_ bv0 64) (zext X))` into
+    `(= (_ bv0 32) X)` (equivalent, since zext is injective and the compared
+    value is zero), so a dumped 64-bit value whose upper bits are known zero
+    can come back as a 32-bit expression while the other side still prints the
+    full 64-bit one.  Both harnesses cast the same 4-byte field to u64 /
+    uint64_t, so comparing on a common width by zero-extending the narrower
+    side recovers exactly the intended comparison.
+    """
+    if width == target:
+        return expr
+    return f'((_ zero_extend {target - width}) {expr})'
+
+
 def make_renamer(names, prefix):
     """Rename every declared array (except shared 'stdin*' inputs) with a
     per-side prefix so the two sides' identically-named constant arrays
@@ -340,22 +356,24 @@ def main():
         pairs = pairs[:args.max_pairs]
 
     n_unsat = n_sat = n_timeout = n_incompatible = n_other = 0
+    n_widened = 0
     for a, b in pairs:
         ida, decls_a, wa, ea, pca, extras_a = a
         idb, decls_b, wb, eb, pcb, extras_b = b
+        width = max(wa, wb)
         if wa != wb:
-            n_other += 1
-            continue
+            n_widened += 1
         ea2, pca2 = rename_a(ea), rename_a(pca)
         eb2, pcb2 = rename_b(eb), rename_b(pcb)
+        ea2, eb2 = widen_to(ea2, wa, width), widen_to(eb2, wb, width)
         extra_block = ''.join(f'(assert {rename_a(x)})\n'
                               for x in extras_a) \
             + ''.join(f'(assert {rename_b(x)})\n' for x in extras_b)
         query = ('(set-logic QF_AUFBV)\n(set-option :produce-models true)\n'
                  + decl_block + '\n'
                  + extra_block
-                 + f'(define-fun va () (_ BitVec {wa}) {ea2})\n'
-                 + f'(define-fun vb () (_ BitVec {wb}) {eb2})\n'
+                 + f'(define-fun va () (_ BitVec {width}) {ea2})\n'
+                 + f'(define-fun vb () (_ BitVec {width}) {eb2})\n'
                  + f'(assert {pca2})\n(assert {pcb2})\n'
                  + '(assert (not (= va vb)))\n(check-sat)\n')
         v = run_z3(query, args.z3, args.timeout)
@@ -386,6 +404,7 @@ def main():
     print(f'DUMPSET_OK pairs={len(pairs)} '
           f'unsat={n_unsat} sat={n_sat} timeout={n_timeout} '
           f'incompatible={n_incompatible} other={n_other} '
+          f'widened={n_widened} '
           f'all_ok={str(ok).lower()}')
     return 0 if ok else 1
 
