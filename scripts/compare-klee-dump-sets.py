@@ -263,6 +263,52 @@ def path_ids(d, tag):
     return sorted(ids)
 
 
+def run_z3_batch(header, queries, z3, timeout, chunk=500):
+    """Answer many independent queries with few Z3 processes.
+
+    `run_z3` starts a process per query, which is fine for a handful of paths and
+    hopeless for a scenario whose two sides explore 256 paths each: 65536 Z3
+    spawns take half an hour, almost all of it process startup.  Each chunk here
+    is one process fed a sequence of
+
+        (push 1) ... (assert ...) (check-sat) (pop 1)
+
+    blocks, so the declarations are parsed once and the per-query time limit is
+    Z3's own `:timeout`.  Returns one answer per query, in order.
+
+    A chunk whose process dies (or exceeds a generous wall-clock bound) is
+    reported as `timeout` for all of its queries: that fails the comparison
+    exactly as an individual timeout would, rather than quietly dropping pairs.
+    """
+    answers = []
+    for start in range(0, len(queries), chunk):
+        part = queries[start:start + chunk]
+        # The declarations go in *once* per process: repeating them per query
+        # makes Z3 reject the second one as a redeclaration.
+        script = ('(set-logic QF_AUFBV)\n'
+                  f'(set-option :timeout {int(timeout * 1000)})\n'
+                  + header
+                  + ''.join(part))
+        try:
+            r = subprocess.run([z3, '-in'], input=script, capture_output=True,
+                               text=True, timeout=timeout * len(part) + 120)
+        except subprocess.TimeoutExpired:
+            answers.extend(['timeout'] * len(part))
+            continue
+        out = r.stdout + r.stderr
+        if '(error' in out or 'error:' in out:
+            answers.extend(['z3_error'] * len(part))
+            continue
+        lines = [l.strip() for l in out.splitlines() if l.strip() in ('sat', 'unsat', 'unknown')]
+        if len(lines) != len(part):
+            # Never guess an alignment: an unparsable batch is a failure of the
+            # comparison, not a proof.
+            answers.extend(['z3_error'] * len(part))
+            continue
+        answers.extend('timeout' if l == 'unknown' else l for l in lines)
+    return answers
+
+
 def run_z3(query, z3, timeout):
     with tempfile.NamedTemporaryFile('w', suffix='.smt2', delete=False) as f:
         f.write(query)
@@ -384,6 +430,11 @@ def main():
 
     n_unsat = n_sat = n_timeout = n_incompatible = n_other = 0
     n_widened = 0
+
+    # Build every pair's query first, then answer them in batches: the queries
+    # are independent, and one Z3 process per pair is the difference between
+    # minutes and hours on a scenario with hundreds of paths per side.
+    pieces = []
     for a, b in pairs:
         ida, decls_a, wa, ea, pca, extras_a = a
         idb, decls_b, wb, eb, pcb, extras_b = b
@@ -396,14 +447,16 @@ def main():
         extra_block = ''.join(f'(assert {rename_a(x)})\n'
                               for x in extras_a) \
             + ''.join(f'(assert {rename_b(x)})\n' for x in extras_b)
-        query = ('(set-logic QF_AUFBV)\n(set-option :produce-models true)\n'
-                 + decl_block + '\n'
-                 + extra_block
-                 + f'(define-fun va () (_ BitVec {width}) {ea2})\n'
-                 + f'(define-fun vb () (_ BitVec {width}) {eb2})\n'
-                 + f'(assert {pca2})\n(assert {pcb2})\n'
-                 + '(assert (not (= va vb)))\n(check-sat)\n')
-        v = run_z3(query, args.z3, args.timeout)
+        pieces.append((ida, idb, pca2, pcb2, extra_block,
+                       '(push 1)\n' + extra_block
+                       + f'(assert {pca2})\n(assert {pcb2})\n'
+                       + f'(assert (not (= {ea2} {eb2})))\n'
+                       + '(check-sat)\n(pop 1)\n'))
+
+    header = decl_block + '\n'
+    queries = [p[5] for p in pieces]
+    answers = run_z3_batch(header, queries, args.z3, args.timeout)
+    for (ida, idb, pca2, pcb2, extra_block, _), v in zip(pieces, answers):
         if v == 'unsat':
             n_unsat += 1
         elif v == 'timeout':
@@ -429,12 +482,8 @@ def main():
                 n_timeout += 1
             else:
                 n_other += 1
-        elif v == 'z3_error':
-            n_other += 1
         else:
             n_other += 1
-        if n_sat:
-            break
 
     ok = n_sat == 0 and n_timeout == 0 and n_other == 0
     print(f'DUMPSET_OK pairs={len(pairs)} '
