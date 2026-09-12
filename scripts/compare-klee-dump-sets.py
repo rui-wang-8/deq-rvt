@@ -393,8 +393,13 @@ def main():
 
     entries_a, entries_b = sides
     if not entries_a or not entries_b:
+        # Nothing to compare is not a proof, and the exit status has to say so:
+        # reporting all_ok=false with status 0 would let a caller that only
+        # checks the status treat an empty dump set as a success.
         print('DUMPSET_OK pairs=0 unsat=0 sat=0 timeout=0 incompatible=0 '
-              'all_ok=false')
+              'truncated=true all_ok=false')
+        print('PARTIAL: one side produced no dumps, so nothing was compared',
+              file=sys.stderr)
         return 1
 
     # Rename each side's constant arrays independently; shared 'stdin*'
@@ -485,12 +490,24 @@ def main():
         else:
             n_other += 1
 
-    ok = n_sat == 0 and n_timeout == 0 and n_other == 0
+    # A comparison that did not look at every pair is not a proof.  This was a
+    # real hole: --max-pairs / --max-side-paths truncated the cross product and
+    # the verdict still said all_ok=true, which is the one direction that must
+    # never be wrong - a hidden divergence would ship as an equivalence proof.
+    # by-id mode is a restricted comparison by construction, so it is partial
+    # too.
+    truncated = bool(args.max_pairs) or bool(args.max_side_paths) or args.mode != 'cross'
+    ok = n_sat == 0 and n_timeout == 0 and n_other == 0 and not truncated
     print(f'DUMPSET_OK pairs={len(pairs)} '
           f'unsat={n_unsat} sat={n_sat} timeout={n_timeout} '
           f'incompatible={n_incompatible} other={n_other} '
           f'widened={n_widened} '
+          f'truncated={str(truncated).lower()} '
           f'all_ok={str(ok).lower()}')
+    if truncated:
+        print('PARTIAL: this comparison covered only part of the pair space '
+              '(--max-pairs/--max-side-paths/--mode by-id), so it is not a proof',
+              file=sys.stderr)
     return 0 if ok else 1
 
 
