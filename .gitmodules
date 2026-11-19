@@ -1,0 +1,4 @@
+[submodule "tools/klee-src"]
+	branch = rvt-for-rust
+	path = tools/klee-src
+	url = git@github.com:rui-wang-8/deq-klee.git
